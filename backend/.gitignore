@@ -1,0 +1,9 @@
+# Python ignores
+__pycache__/
+*.pyc
+.env
+
+# Virtual Environment ignores (just in case you created one locally)
+venv/
+env/
+.venv/
