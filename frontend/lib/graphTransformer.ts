@@ -1,5 +1,6 @@
 import dagre from 'dagre';
 import { Node, Edge, Position } from '@xyflow/react';
+import { DecompositionProposal } from './types';
 
 const nodeWidth = 220;
 const nodeHeight = 50;
@@ -45,6 +46,48 @@ export const transformToReactFlow = (apiData: any) => {
 
   return getLayoutedElements(initialNodes, initialEdges);
 };
+
+export const transformDecompositionToReactFlow = (proposal: any) => {
+    if (!proposal || !proposal.proposed_services) return { nodes: [], edges: [] };
+  
+    // 1. Map Proposed Services to Nodes
+    const initialNodes: Node[] = proposal.proposed_services.map((svc: any) => ({
+      id: svc.service_name,
+      type: 'default',
+      data: {
+        label: svc.service_name,
+        ...svc, // Inject all the DDD data (bounded_context, endpoints, etc.)
+        isDecompositionNode: true // Flag to help the UI know what panel to show
+      },
+      position: { x: 0, y: 0 },
+      style: {
+        border: '2px solid #8b5cf6', // Distinctive Purple border for proposed architecture
+        padding: '12px',
+        borderRadius: '8px',
+        background: '#f5f3ff', // Light purple background
+        color: '#4c1d95',
+        fontSize: '13px',
+        fontWeight: '700',
+        width: 220,
+        textAlign: 'center',
+      },
+    }));
+  
+    // 2. Map Integration Points to Edges
+    const initialEdges: Edge[] = proposal.integration_points.map((pt: any, idx: number) => ({
+      id: `e-decomp-${pt.source_service}-${pt.target_service}-${idx}`,
+      source: pt.source_service,
+      target: pt.target_service,
+      animated: true,
+      label: pt.communication_pattern, // e.g., "Synchronous (REST)"
+      labelStyle: { fill: '#6b7280', fontWeight: 500, fontSize: 10 },
+      labelBgStyle: { fill: '#ffffff', fillOpacity: 0.8 },
+      style: { stroke: '#8b5cf6', strokeWidth: 2 },
+      type: 'smoothstep'
+    }));
+  
+    return getLayoutedElements(initialNodes, initialEdges);
+  };
 
 // Layout logic (Dagre)
 export const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {

@@ -11,12 +11,15 @@ import {
   Edge 
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import { transformDecompositionToReactFlow, transformToReactFlow } from '@/lib/graphTransformer';
+import { DecompositionProposal } from '@/lib/types';
 import Editor from '@monaco-editor/react';
 import { 
   Download, Layers, Box, Terminal, Play, 
   Database, ShieldCheck, Activity, CheckCircle, Cloud, FileCode 
 } from 'lucide-react';
-import { transformToReactFlow } from '@/lib/graphTransformer';
+
+
 
 // --- TYPES ---
 type AppNodeData = {
@@ -46,12 +49,15 @@ type Proposal = {
 export default function Dashboard() {
   // --- STATE ---
   const [projectId, setProjectId] = useState<string | null>(null);
-  const [view, setView] = useState<'graph' | 'infra'>('graph');
+  const [view, setView] = useState<'graph' | 'infra' | 'decomposition'>('graph');
   
   // Graph Data
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+
+  // Store the raw AI response for summaries and risks
+  const [decompositionData, setDecompositionData] = useState<DecompositionProposal | null>(null);
   
   // GLOBAL FILE MEMORY (Prevents data loss when switching nodes)
   // Format: { "node_id": { "docker": "...", "k8s": "..." } }
@@ -66,6 +72,7 @@ export default function Dashboard() {
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [terraformFiles, setTerraformFiles] = useState<Record<string, string>>({});
   const [activeTerraformFile, setActiveTerraformFile] = useState<string>("main.tf");
+
 
   // --- HANDLERS ---
 
@@ -96,6 +103,7 @@ export default function Dashboard() {
     }
   };
 
+  
   const handleAnalyze = async (url: string) => {
     setIsGenerating(true);
     const formData = new FormData();
@@ -246,7 +254,39 @@ export default function Dashboard() {
     finally { setIsGenerating(false); }
   };
 
+  const handleDecomposeMonolith = async (targetDirectory: string) => {
+    setIsGenerating(true);
+    setEditorContent("// Analyzing monolithic structure...");
+    
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/decompose-monolith', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_directory: targetDirectory })
+      });
+      
+      if (!res.ok) throw new Error("Decomposition failed");
+      
+      const data: DecompositionProposal = await res.json();
+      setDecompositionData(data);
+      
+      // Transform and update the React Flow canvas!
+      const { nodes: flowNodes, edges: flowEdges } = transformDecompositionToReactFlow(data);
+      setNodes(flowNodes);
+      setEdges(flowEdges);
+      
+      setView('decomposition');
+      
+    } catch (err) {
+      alert("Monolith Decomposition Failed. Check console.");
+      console.error(err);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   // --- RENDER HELPERS ---
+  const nodeData = selectedNode?.data as any;
   const isServiceNode = selectedNode?.data?.nodeType === 'SERVICE';
 
   return (
@@ -276,17 +316,25 @@ export default function Dashboard() {
           <button className="flex items-center justify-center gap-2 w-full bg-black text-white py-2 rounded-md text-sm hover:bg-gray-800 transition shadow-sm">
             <Download className="w-4 h-4" /> Export Project
           </button>
+          <button 
+            onClick={() => handleDecomposeMonolith('/Users/arjunsanjay/project-phoenix/backend/mock-mes')} 
+            className="mt-3 flex items-center justify-center gap-2 w-full bg-purple-600 text-white py-2 rounded-md text-sm hover:bg-purple-700 transition shadow-sm"
+          >
+            <Box className="w-4 h-4" /> Test Decomposition
+          </button>
         </div>
       </aside>
 
       {/* 2. MAIN CONTENT AREA */}
       <main className="flex-1 flex flex-col relative h-full overflow-hidden">
         
-        {/* GRAPH VIEW */}
-        {view === 'graph' && (
+        {/* GRAPH & DECOMPOSITION VIEW (Both use the ReactFlow Canvas) */}
+        {(view === 'graph' || view === 'decomposition') && (
           <div className="flex-1 w-full h-full bg-gray-50 relative">
              <div className="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur px-4 py-2 rounded-lg shadow-sm border border-gray-200">
-               <h2 className="text-sm font-semibold text-gray-700">Service Map</h2>
+               <h2 className="text-sm font-semibold text-gray-700">
+                 {view === 'decomposition' ? 'Proposed Architecture Map' : 'Service Map'}
+               </h2>
              </div>
              <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onNodeClick={onNodeClick} fitView minZoom={0.1}>
                <Background color="#e5e7eb" gap={20} />
@@ -299,13 +347,10 @@ export default function Dashboard() {
         {view === 'infra' && (
           <div className="flex-1 flex flex-col p-8 overflow-y-auto bg-gray-50">
             <div className="max-w-6xl mx-auto w-full grid grid-cols-12 gap-6 h-[80vh]">
-                
-                {/* LEFT: CHECKLIST (Col 4) */}
                 <div className="col-span-4 bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
                     <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
                         <CheckCircle className="w-5 h-5 text-green-500" /> Resources
                     </h3>
-                    
                     {!proposal ? (
                         <div className="flex-1 flex items-center justify-center text-gray-400 text-sm italic">
                             No project loaded.
@@ -313,20 +358,7 @@ export default function Dashboard() {
                     ) : (
                         <div className="flex-1 overflow-y-auto space-y-3">
                             {proposal.detected_resources.map((res, idx) => (
-                                <div 
-                                    key={idx} 
-                                    onClick={() => toggleResource(idx)} 
-                                    className={`p-4 rounded-lg border cursor-pointer transition-all duration-200 relative overflow-hidden ${
-                                        res.approved 
-                                        ? 'border-blue-600 bg-blue-50 shadow-sm ring-1 ring-blue-600' 
-                                        : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'
-                                    }`}
-                                >
-                                    {res.approved && (
-                                        <div className="absolute top-0 right-0 bg-blue-600 text-white text-[10px] px-2 py-0.5 rounded-bl-lg font-bold">
-                                            APPROVED
-                                        </div>
-                                    )}
+                                <div key={idx} className={`p-4 rounded-lg border transition-all duration-200 relative overflow-hidden ${res.approved ? 'border-blue-600 bg-blue-50 shadow-sm ring-1 ring-blue-600' : 'border-gray-200'}`}>
                                     <div className="flex items-center gap-3">
                                         <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${res.approved ? 'bg-blue-600 border-blue-600' : 'border-gray-400'}`}>
                                             {res.approved && <CheckCircle className="w-3.5 h-3.5 text-white" />}
@@ -343,22 +375,14 @@ export default function Dashboard() {
                             ))}
                         </div>
                     )}
-
-                    <button onClick={generateTerraform} disabled={isGenerating || !proposal} className="mt-6 w-full bg-black text-white py-3 rounded-lg font-medium hover:bg-gray-800 disabled:opacity-50 flex justify-center items-center gap-2">
+                    <button disabled={isGenerating || !proposal} className="mt-6 w-full bg-black text-white py-3 rounded-lg font-medium hover:bg-gray-800 disabled:opacity-50 flex justify-center items-center gap-2">
                         {isGenerating ? 'Architecting...' : <><Play className="w-4 h-4" /> Generate Terraform</>}
                     </button>
                 </div>
-
-                {/* RIGHT: OUTPUT TABS (Col 8) */}
                 <div className="col-span-8 bg-gray-900 rounded-xl shadow-lg border border-gray-800 overflow-hidden flex flex-col h-full">
-                    {/* File Tabs */}
                     <div className="bg-gray-800 px-2 flex overflow-x-auto border-b border-gray-700">
                         {Object.keys(terraformFiles).length > 0 ? Object.keys(terraformFiles).map(fileName => (
-                            <button
-                                key={fileName}
-                                onClick={() => setActiveTerraformFile(fileName)}
-                                className={`px-4 py-3 text-xs font-mono border-r border-gray-700 hover:bg-gray-700 transition-colors ${activeTerraformFile === fileName ? 'bg-gray-900 text-blue-400 border-b-2 border-b-blue-400' : 'text-gray-400'}`}
-                            >
+                            <button key={fileName} onClick={() => setActiveTerraformFile(fileName)} className={`px-4 py-3 text-xs font-mono border-r border-gray-700 hover:bg-gray-700 transition-colors ${activeTerraformFile === fileName ? 'bg-gray-900 text-blue-400 border-b-2 border-b-blue-400' : 'text-gray-400'}`}>
                                 <div className="flex items-center gap-2">
                                     <FileCode className="w-3 h-3" /> {fileName}
                                 </div>
@@ -367,16 +391,8 @@ export default function Dashboard() {
                             <div className="px-4 py-3 text-xs font-mono text-gray-500">Waiting for generation...</div>
                         )}
                     </div>
-                    
-                    {/* Editor */}
                     <div className="flex-1">
-                        <Editor
-                            height="100%"
-                            defaultLanguage="hcl"
-                            theme="vs-dark"
-                            value={terraformFiles[activeTerraformFile] || ""}
-                            options={{ minimap: { enabled: false }, fontSize: 13, readOnly: true, automaticLayout: true }}
-                        />
+                        <Editor height="100%" defaultLanguage="hcl" theme="vs-dark" value={terraformFiles[activeTerraformFile] || ""} options={{ minimap: { enabled: false }, fontSize: 13, readOnly: true, automaticLayout: true }} />
                     </div>
                 </div>
             </div>
@@ -384,31 +400,23 @@ export default function Dashboard() {
         )}
       </main>
 
-      {/* 3. RIGHT INSPECTOR (Visible only in Graph View) */}
+      {/* 3. RIGHT INSPECTORS */}
+      
+      {/* 3A. Standard Microservices Inspector */}
       {view === 'graph' && (
         <aside className="w-[500px] bg-white border-l border-gray-200 flex flex-col shadow-xl z-30">
-            {/* Header with Tabs */}
             <div className="h-14 border-b border-gray-200 flex items-center px-4 justify-between bg-gray-50">
-            <span 
-  className="font-semibold text-sm truncate max-w-[200px]" 
-  title={selectedNode ? (selectedNode.data.label as string) : ''}
->
-                    {selectedNode ? selectedNode.data.label as string : 'Select a Service'}
+                <span className="font-semibold text-sm truncate max-w-[200px]" title={nodeData ? (nodeData.label as string) : ''}>
+                    {nodeData ? nodeData.label as string : 'Select a Service'}
                 </span>
                 <div className="flex gap-1 bg-gray-200 p-1 rounded-lg">
                     {['code', 'docker', 'k8s'].map((tab) => (
-                        <button 
-                            key={tab}
-                            onClick={() => handleTabSwitch(tab as any)}
-                            className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeTab === tab ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                        >
+                        <button key={tab} onClick={() => setActiveTab(tab as any)} className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeTab === tab ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                             {tab.charAt(0).toUpperCase() + tab.slice(1)}
                         </button>
                     ))}
                 </div>
             </div>
-
-            {/* Action Bar */}
             {activeTab !== 'code' && (
                 <div className="p-4 bg-gray-50 border-b flex justify-between items-center">
                     <h3 className="text-xs font-bold uppercase text-gray-500">
@@ -423,17 +431,76 @@ export default function Dashboard() {
                     </button>
                 </div>
             )}
-
             <div className="flex-1 overflow-hidden relative">
-                <Editor
-                    height="100%"
-                    defaultLanguage={activeTab === 'code' ? 'java' : activeTab === 'docker' ? 'dockerfile' : 'yaml'}
-                    value={editorContent}
-                    options={{ minimap: { enabled: false }, fontSize: 12, readOnly: true, automaticLayout: true }}
-                />
+                <Editor height="100%" defaultLanguage={activeTab === 'code' ? 'java' : activeTab === 'docker' ? 'dockerfile' : 'yaml'} value={editorContent} options={{ minimap: { enabled: false }, fontSize: 12, readOnly: true, automaticLayout: true }} />
             </div>
         </aside>
       )}
+
+      {/* 3B. Monolith Decomposition Panel */}
+      {view === 'decomposition' && nodeData?.isDecompositionNode && (
+        <aside className="w-[500px] bg-white border-l border-gray-200 flex flex-col shadow-xl z-30 overflow-y-auto">
+          <div className="p-6">
+            <h2 className="text-2xl font-bold text-gray-800 mb-1">{nodeData.label}</h2>
+            <p className="text-sm text-gray-500 mb-6 pb-4 border-b">{nodeData.primary_responsibility}</p>
+
+            {/* Bounded Context */}
+            <div className="mb-6">
+              <h3 className="font-semibold text-sm text-gray-700 mb-2">Bounded Context</h3>
+              <span className="inline-block px-3 py-1 bg-purple-100 text-purple-800 text-xs font-bold rounded-full">
+                {nodeData.bounded_context}
+              </span>
+            </div>
+
+            {/* Assigned Files */}
+            <div className="mb-6">
+              <h3 className="font-semibold text-sm text-gray-700 mb-2">Assigned Files</h3>
+              <ul className="list-none space-y-1">
+                {nodeData.files_and_folders.map((file: string) => (
+                  <li key={file} className="font-mono text-xs bg-gray-50 p-2 rounded border border-gray-100 text-gray-600 flex items-center gap-2">
+                    <FileCode size={14} className="text-blue-500" /> {file}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Database Tables */}
+            {nodeData.database_tables && nodeData.database_tables.length > 0 && (
+              <div className="mb-6">
+                <h3 className="font-semibold text-sm text-gray-700 mb-2">Data Ownership</h3>
+                <div className="flex flex-wrap gap-2">
+                  {nodeData.database_tables.map((table: string) => (
+                    <span key={table} className="font-mono text-xs bg-emerald-50 text-emerald-700 p-1.5 rounded border border-emerald-200 flex items-center gap-1">
+                      <Database size={12} /> {table}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Exposed Endpoints */}
+            {nodeData.exposed_endpoints && nodeData.exposed_endpoints.length > 0 && (
+              <div className="mb-6">
+                <h3 className="font-semibold text-sm text-gray-700 mb-2">Required APIs</h3>
+                <div className="space-y-2">
+                  {nodeData.exposed_endpoints.map((api: any, idx: number) => (
+                    <div key={idx} className="bg-gray-50 border border-gray-200 rounded p-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded text-white ${api.method === 'GET' ? 'bg-blue-500' : api.method === 'POST' ? 'bg-green-500' : 'bg-orange-500'}`}>
+                          {api.method}
+                        </span>
+                        <span className="font-mono text-xs font-semibold">{api.path}</span>
+                      </div>
+                      <p className="text-xs text-gray-500">{api.purpose}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
+
     </div>
   );
 }

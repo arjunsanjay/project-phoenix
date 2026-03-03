@@ -7,7 +7,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from app.models.infrastructure import InfrastructureProposal
 from app.models.k8s import ServiceDefinition, K8sManifests
-
+from app.models.monolith import DecompositionProposal
 class AIEngine:
     def __init__(self):
         # 1. Initialize the LLM (Gemini)
@@ -91,6 +91,27 @@ class AIEngine:
         - "manifest_yaml": The full YAML for the Deployment or Job.
         - "service_yaml": The Service YAML (return null or empty string if it's a Job).
         - "configmap_yaml": Any config maps needed (or empty string).
+        """)
+
+        # --- MONOLITH DECOMPOSITION ---
+        self.decomposition_prompt = PromptTemplate.from_template("""
+        You are an Expert Enterprise Architect specializing in Domain-Driven Design (DDD) and microservices migration.
+        Your task is to analyze the internal dependency graph of a tightly coupled monolithic application and propose a strategy to decouple it into independent microservices.
+
+        INTERNAL DEPENDENCY GRAPH (Adjacency List):
+        {dependency_graph}
+        
+        RULES FOR DECOMPOSITION:
+        1. Identify "Bounded Contexts" based on the clusters of dependencies.
+        2. Identify shared utilities or databases that might become bottlenecks.
+        3. Determine which files belong to which new proposed microservice.
+        4. Define the necessary integration points (APIs/Event buses) required to replace the internal function imports.
+
+        STRICT OUTPUT (JSON):
+        You must return a valid JSON object that strictly adheres to the following schema:
+        {schema_instructions}
+        
+        Do not include markdown blocks, just the raw JSON.
         """)
     
     async def generate_docker_stream(self, node_data: dict):
@@ -195,6 +216,35 @@ class AIEngine:
         except Exception as e:
             print(f"K8s Gen Failed: {e}")
             return self._generate_mock_k8s(service_def)
+    
+
+    async def generate_monolith_decomposition(self, dependency_graph_json: str) -> dict:
+        """
+        Analyzes a monolith's internal dependency graph and proposes a DDD microservices architecture.
+        """
+        if not self.llm:
+            return {"error": "No API Key available for decomposition."}
+
+        # We use LangChain's JsonOutputParser to automatically inject our Pydantic schema
+        # instructions into the prompt, ensuring Gemini returns exactly what we need.
+        parser = JsonOutputParser(pydantic_object=DecompositionProposal)
+        
+        chain = self.decomposition_prompt | self.llm | parser
+
+        try:
+            print("🧠 Analyzing Monolith Architecture with Gemini...")
+            # We use ainvoke because architecture analysis can take a few seconds
+            # and we don't want to block the FastAPI event loop.
+            result = await chain.ainvoke({
+                "dependency_graph": dependency_graph_json,
+                "schema_instructions": parser.get_format_instructions()
+            })
+            
+            return result
+            
+        except Exception as e:
+            print(f"⚠️ Monolith Decomposition Failed: {e}")
+            return {"error": str(e)}
         
 
     def _clean_json(self, text: str) -> Dict[str, Any]:

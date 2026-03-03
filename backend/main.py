@@ -2,7 +2,8 @@ import os
 import re
 from dotenv import load_dotenv
 from typing import Dict, Any, List
-from pydantic import BaseModel 
+from pydantic import BaseModel, Field 
+
 
 # Load Environment Variables
 load_dotenv()
@@ -11,9 +12,11 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+
 # --- Services ---
 from app.services.ingestion import IngestionService
 from app.services.analyzer import CodeAnalyzer
+from app.services.monolith_analyzer import MonolithAnalyzer
 from app.services.ai_engine import AIEngine
 from app.services.resource_detector import ResourceDetector
 from app.services.pipeline_generator import PipelineGenerator
@@ -49,6 +52,12 @@ project_store: Dict[str, Dict[str, Any]] = {}
 class GenerateRequest(BaseModel):
     project_id: str
     node_id: str
+
+class MonolithAnalyzeRequest(BaseModel):
+    target_directory: str = Field(
+        ..., 
+        description="The absolute or relative path to the monolithic codebase to analyze."
+    )
 
 @app.post("/ingest/upload")
 async def ingest_zip(file: UploadFile = File(...)):
@@ -307,6 +316,47 @@ def get_project_context(project_id: str):
     if project_id not in project_store:
         raise HTTPException(status_code=404, detail="Project not found")
     return project_store[project_id]["context"]
+
+@app.post("/api/v1/decompose-monolith", tags=["Architecture"])
+async def decompose_monolith(request: MonolithAnalyzeRequest):
+    """
+    Analyzes a monolithic codebase and returns an AI-generated 
+    Domain-Driven Design (DDD) decomposition proposal.
+    """
+    target_path = os.path.abspath(request.target_directory)
+
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail=f"Directory not found: {target_path}")
+
+    try:
+        # Step 1: Extract the internal dependency graph using tree-sitter
+        print(f"🔍 Starting local AST analysis on: {target_path}")
+        analyzer = MonolithAnalyzer(target_path)
+        dependency_graph_json = analyzer.extract_dependencies()
+
+        # Safety check: Did we find anything?
+        if dependency_graph_json == "{}" or not dependency_graph_json:
+            raise HTTPException(
+                status_code=400, 
+                detail="No internal dependencies found. Ensure the directory contains Python/JS/TS files."
+            )
+
+        print(f"✅ Extracted Graph: {dependency_graph_json}")
+        
+        # Step 2: Pass the structural graph to Gemini for DDD analysis
+        print("🧠 Sending graph to Gemini for Bounded Context decomposition...")
+        proposal = await ai_engine.generate_monolith_decomposition(dependency_graph_json)
+
+        # Handle potential AI failure gracefully
+        if "error" in proposal:
+             raise HTTPException(status_code=500, detail=proposal["error"])
+
+        # Step 3: Return the structured JSON directly to the client/frontend
+        return proposal
+
+    except Exception as e:
+        print(f"🔥 Error during monolith decomposition: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def read_root():
